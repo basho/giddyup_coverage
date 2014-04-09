@@ -1,0 +1,13 @@
+{application, giddyup_coverage,
+ [
+  {description, ""},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  lager,
+                  pgsql
+                 ]},
+  {env, []}
+ ]}.
