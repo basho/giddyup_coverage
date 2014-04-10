@@ -1,3 +1,4 @@
+.PHONY: deps
 
 all: deps compile
 	./rebar skip_deps=true escriptize
