@@ -89,50 +89,61 @@ main(Args) ->
     filelib:ensure_dir(VersionIndexName),
     {ok, VersionIndex} = file:open(VersionIndexName, [write]),
     init_analyze(VersionIndex),
+    file:write(VersionIndex, "<table>"),
     
     Blah = lists:foldl(fun({PName, SID}, Acc) ->
-                case pgsql_connection:extended_query("select test_results.id, tests.name from test_results INNER JOIN tests ON (test_results.test_id = tests.id) WHERE status='t' AND tags->'platform'=$1 AND scorecard_id=$2", [Platform, SID], Conn) of
+                case pgsql_connection:extended_query("SELECT test_results.id, status, tests.name FROM test_results INNER JOIN tests ON (test_results.test_id = tests.id) WHERE tags->'platform'=$1 AND scorecard_id=$2", [Platform, SID], Conn) of
                     {{select, 0}, []} -> Acc;
                     {{select, _N}, Results} ->
                         ProjectIndexName = filename:join([Version, PName, "index.html"]),
                         filelib:ensure_dir(ProjectIndexName),
                         {ok, ProjectIndex} = file:open(ProjectIndexName, [write]),
                         init_analyze(ProjectIndex),
+                        file:write(ProjectIndex, "<table>"),
                         pre_analyze(VersionIndex, PName),
                         R = [begin
-                                    %% get the URL of the coverdata
-                                    case pgsql_connection:extended_query("SELECT url FROM artifacts WHERE test_result_id=$1 AND url LIKE '%coverdata%'", [TestResultID], Conn) of
-                                        {{select, 1}, [{URL}]} ->
-                                            case lhttpc:request(binary_to_list(URL), "GET", [], 60000) of
-                                                {ok, {{200, _}, _Headers, GzBody}} ->
-                                                    Body = zlib:gunzip(GzBody),
-                                                    Name = case binary:split(lists:last(binary:split(URL, <<"/">>, [global])), <<".gz">>, [trim]) of
-                                                        [<<"eunit.coverdata">>=N] ->
-                                                            list_to_binary([TestName, "-", N]);
-                                                        [N] -> N
-                                                    end,
-                                                    file:write_file(Name, Body),
-                                                    cover:import(Name),
-                                                    Index = filename:join([Version, PName, TestName, "index.html"]),
-                                                    filelib:ensure_dir(Index),
-                                                    {ok, F} = file:open(Index, [write]),
-                                                    init_analyze(F),
-                                                    pre_analyze(ProjectIndex, TestName),
-                                                    {Total, {TotalCovered, TotalNotCovered}} = analyze(F, ProjectIndex, TestName, binary_to_list(filename:join([Version, PName, TestName]))),
-                                                    file:sync(ProjectIndex),
-                                                    %% XXX cover doesn't reset if there were no compiled moduled
-                                                    cover:stop(),
-                                                    cover:start(),
-                                                    {TestName, Name, {TotalCovered, TotalNotCovered}};
-                                                _ ->
-                                                    lager:warning("unable to fetch coverdata for ~p from ~p", [TestName, URL]),
+                                    case Status of
+                                        true ->
+                                            %% get the URL of the coverdata
+                                            case pgsql_connection:extended_query("SELECT url FROM artifacts WHERE test_result_id=$1 AND url LIKE '%coverdata%'", [TestResultID], Conn) of
+                                                {{select, 1}, [{URL}]} ->
+                                                    case lhttpc:request(binary_to_list(URL), "GET", [], 60000) of
+                                                        {ok, {{200, _}, _Headers, GzBody}} ->
+                                                            Body = zlib:gunzip(GzBody),
+                                                            Name = case binary:split(lists:last(binary:split(URL, <<"/">>, [global])), <<".gz">>, [trim]) of
+                                                                [<<"eunit.coverdata">>=N] ->
+                                                                    list_to_binary([TestName, "-", N]);
+                                                                [N] -> N
+                                                            end,
+                                                            file:write_file(Name, Body),
+                                                            cover:import(Name),
+                                                            Index = filename:join([Version, PName, TestName, "index.html"]),
+                                                            filelib:ensure_dir(Index),
+                                                            {ok, F} = file:open(Index, [write]),
+                                                            init_analyze(F),
+                                                            pre_analyze(ProjectIndex, TestName),
+                                                            {Total, {TotalCovered, TotalNotCovered}} = analyze(F, ProjectIndex, TestName, binary_to_list(filename:join([Version, PName, TestName]))),
+                                                            file:sync(ProjectIndex),
+                                                            %% XXX cover doesn't reset if there were no compiled moduled
+                                                            cover:stop(),
+                                                            cover:start(),
+                                                            {TestName, Name, {TotalCovered, TotalNotCovered}};
+                                                        _ ->
+                                                            lager:warning("unable to fetch coverdata for ~p from ~p", [TestName, URL]),
+                                                            file:write(ProjectIndex, ["<tr><td>", TestName, "</td><td>No Coverage</td></tr>"]),
+                                                            []
+                                                    end;
+                                                {{select, 0}, []} ->
+                                                    lager:warning("no coverdata for ~p", [TestName]),
+                                                    file:write(ProjectIndex, ["<tr><td>", TestName, "</td><td>No Coverage</td></tr>"]),
                                                     []
                                             end;
-                                        {{select, 0}, []} ->
-                                            lager:warning("no coverdata for ~p", [TestName]),
+                                        false ->
+                                            lager:warning("~p failed", [TestName]),
+                                            file:write(ProjectIndex, ["<tr><td>", TestName, "</td><td>Failed</td></tr>"]),
                                             []
                                     end
-                            end || {TestResultID, TestName} <- Results],
+                            end || {TestResultID, Status, TestName} <- Results],
                         file:write(ProjectIndex, "</table>"),
                         file:write(ProjectIndex, "<h1>Aggregate coverage:</h1><table>"),
 
@@ -146,11 +157,9 @@ main(Args) ->
                 end
         end, [], ScorecardIDs),
 
-    io:format("~p~n", [Blah]),
-
     [ [cover:import(F) || {_, F, _} <- R] || {_Platform, R} <- Blah ],
     file:write(VersionIndex, "</table>"),
-    file:write(VersionIndex, "<h1>Aggregate coverage:</h1><table>"),
+    file:write(VersionIndex, "<h1>Aggregate coverage:</h1>"),
 
     analyze(VersionIndex, undefined, Version, Version),
 
@@ -158,40 +167,54 @@ main(Args) ->
     ok.
 
 init_analyze(F) ->
-    file:write(F, "<h1>Individual coverage:</h1><table>").
+    file:write(F, "<h1>Individual coverage:</h1>").
 
 pre_analyze(F2, Name) ->
     file:write(F2, ["<tr><td><a href=\"./", Name, "/\">", Name, "</a></td>"]).
 
 analyze(F, F2, Name, Dir) ->
-    Modules = cover:imported_modules(),
-    CData = lists:foldl(fun(M, Acc2) ->
-                %% don't crash if the module is not in the code path
-                try M:module_info() of
-                    _ ->
-                        case cover:analyze(M, coverage, module) of
-                            {ok, {M, {0, 0}}} ->
-                                [{M, 0, {0, 0}} | Acc2];
-                            {ok, {M, {Covered, NotCovered}}} ->
-                                File = filename:join([Dir, atom_to_list(M) ++ ".html"]),
-                                cover:analyse_to_file(M, File, [html]),
-                                [{M, trunc((Covered / (Covered + NotCovered)) * 100), {Covered, NotCovered}} | Acc2];
-                            {error, Reason} ->
-                                lager:warning("Cover analysis for ~p failed: ~p", [M, Reason]),
-                                Acc2
-                        end
-                    catch
-                        _:_ ->
-                            Acc2
-                    end
-        end, [], Modules),
-    [file:write(F, "<tr><td><a href=\""++atom_to_list(M) ++ ".html\">" ++atom_to_list(M) ++ "</a></td><td>" ++ integer_to_list(Percent) ++ "%</td></tr>") || {M, Percent, _} <- lists:keysort(2, CData)],
+    Modules = group_by_app(cover:imported_modules()),
+    CData = lists:map(fun({App, Mods}) ->
+                {App, lists:foldl(fun(M, Acc2) ->
+                            %% don't crash if the module is not in the code path
+                            try M:module_info() of
+                                _ ->
+                                    case cover:analyze(M, coverage, module) of
+                                        {ok, {M, {0, 0}}} ->
+                                            [{M, 0, {0, 0}} | Acc2];
+                                        {ok, {M, {Covered, NotCovered}}} ->
+                                            File = filename:join([Dir, atom_to_list(M) ++ ".html"]),
+                                            cover:analyse_to_file(M, File, [html]),
+                                            [{M, trunc((Covered / (Covered + NotCovered)) * 100), {Covered, NotCovered}} | Acc2];
+                                        {error, Reason} ->
+                                            lager:warning("Cover analysis for ~p failed: ~p", [M, Reason]),
+                                            Acc2
+                                    end
+                                catch
+                                    _:_ ->
+                                        Acc2
+                                end
+                        end, [], Mods)}
+        end, Modules),
+    lists:foreach(fun({App, Mods}) when Mods /= [] ->
+                file:write(F, ["<h2>", App,"/<h2><table>"]),
+                [file:write(F, "<tr><td><a href=\""++atom_to_list(M) ++ ".html\">" ++atom_to_list(M) ++ "</a></td><td>" ++ integer_to_list(Percent) ++ "%</td></tr>") || {M, Percent, _} <- lists:keysort(2, Mods)],
+                {TotalCovered, TotalNotCovered} = lists:foldl(fun({_, _, {Cov, NotCov}}, {T1, T2}) ->
+                            {T1+Cov, T2+NotCov}
+                    end, {0, 0}, Mods),
+                Total = percent(TotalCovered, TotalCovered + TotalNotCovered),
+                file:write(F, ["<tr><td></td><td></td></tr><tr><td>Total</td><td>", integer_to_list(Total), "%</td></tr>"]),
+                file:write(F, "</table>");
+            (_) ->
+                ok
+        end, CData),
+
     {TotalCovered, TotalNotCovered} = lists:foldl(fun({_, _, {Cov, NotCov}}, {T1, T2}) ->
                 {T1+Cov, T2+NotCov}
-        end, {0, 0}, CData),
+        end, {0, 0}, lists:flatten([M || {_A, M} <- CData])),
     Total = percent(TotalCovered, TotalCovered + TotalNotCovered),
-    file:write(F, ["<tr><td></td><td></td></tr><tr><td>Total</td><td>", integer_to_list(Total), "%</td></tr>"]),
-    file:write(F, "</table>"),
+    file:write(F, ["<table><tr><td></td><td></td></tr><tr><td>Total</td><td>", integer_to_list(Total), "%</td></tr></table>"]),
+
     file:close(F),
     case F2 of
         undefined ->
@@ -206,3 +229,10 @@ analyze(F, F2, Name, Dir) ->
 percent(0, 0) -> 0;
 percent(Part, All) ->
     trunc((Part / All) * 100).
+
+group_by_app(Modules) ->
+    lists:sort(dict:to_list(lists:foldl(fun(M, Dict) ->
+                App = filename:basename(filename:dirname(filename:dirname(code:which(M)))),
+                dict:append(App, M, Dict)
+        end, dict:new(), Modules))).
+
